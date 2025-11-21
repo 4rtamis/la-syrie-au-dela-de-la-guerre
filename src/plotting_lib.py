@@ -16,7 +16,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.patches import Patch
+from matplotlib.patches import Patch, FancyBboxPatch
 from matplotlib.ticker import PercentFormatter
 
 # Pastel, print-friendly palette centered on oranges, reds, maroons, and greens.
@@ -41,7 +41,7 @@ def _configure_style() -> None:
     mpl.rcParams.update(
         {
             "figure.facecolor": "#ffffff",
-            "axes.facecolor": "#fffdfa",
+            "axes.facecolor": "#ffffff",
             "axes.edgecolor": "#4a2f2f",
             "axes.labelcolor": "#331c1c",
             "axes.spines.top": False,
@@ -79,6 +79,141 @@ def _format_percentage(value: float) -> str:
     return f"{formatted} %"
 
 
+def plot_analysis_pipeline(
+    ax: Optional[plt.Axes] = None,
+    *,
+    figsize: tuple[float, float] = (10, 12),
+    title: Optional[str] = None,
+) -> plt.Axes:
+    """
+    Plot a high-level pipeline summarizing the article analysis process.
+
+    The diagram highlights the successive phases applied to the RTBF corpus:
+    preparation, pre-analysis, stereotype detection, and the final plotting step.
+    """
+
+    phases = [
+        {
+            "title": "RTBF Corpus",
+            "items": ["Corpus complet des articles RTBF"],
+            "color": PALETTE[0],
+        },
+        {
+            "title": "Phase 1 — Préparation des données",
+            "items": [
+                "Filtrer les articles mentionnant « Syrie »",
+                "Filtrer par catégories (MONDE, SOCIETE, MEDIAS, ...)",
+            ],
+            "color": PALETTE[1],
+        },
+        {
+            "title": "Phase 2 — Pré-analyse",
+            "items": [
+                "Notes de lecture -> liste de mots-clés liée à l'idée reçue",
+                "Envoi des notes + mots-clés à Mistral pour amélioration",
+                "Filtrage du corpus avec mots-clés obligatoires/optionnels (>= 3 matches)",
+            ],
+            "color": PALETTE[2],
+        },
+        {
+            "title": "Phase 3 — Détection des stéréotypes",
+            "items": [
+                "Création d'un agent LLM (Mistral Small) avec consignes de détection",
+                "Envoi de chaque article à l'agent et collecte des réponses formatées",
+            ],
+            "color": PALETTE[4],
+        },
+        {
+            "title": "Phase 4 — Analyse des résultats",
+            "items": ["Analyse et visualisation en Python + Matplotlib"],
+            "color": PALETTE[6],
+        },
+    ]
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+
+    center_x = 0.5
+    spacing = 2.3
+    start_y = (len(phases) - 1) * spacing
+
+    boxes: list[dict[str, Any]] = []
+    for idx, phase in enumerate(phases):
+        y_pos = start_y - idx * spacing
+        height = 0.55 + 0.35 * max(len(phase["items"]), 1)
+        width = 0.88
+        left = center_x - width / 2
+        bottom = y_pos - height / 2
+
+        boxes.append(
+            {
+                "phase": phase,
+                "y": y_pos,
+                "height": height,
+                "width": width,
+                "left": left,
+                "bottom": bottom,
+            }
+        )
+
+    ax.set_xlim(0, 1)
+    ax.set_ylim(-0.7, start_y + 1.2)
+    ax.axis("off")
+
+    for idx, box in enumerate(boxes):
+        phase = box["phase"]
+        rounded_box = FancyBboxPatch(
+            (box["left"], box["bottom"]),
+            box["width"],
+            box["height"],
+            boxstyle="round,pad=0.35",
+            facecolor=phase["color"],
+            edgecolor="#2b1f1f",
+            linewidth=1.1,
+            alpha=0.9,
+            mutation_scale=6,
+        )
+        ax.add_patch(rounded_box)
+
+        wrapped_items = [
+            textwrap.fill(f"• {item}", width=55, subsequent_indent="  ")
+            for item in phase["items"]
+        ]
+        text_block = "\n".join([phase["title"]] + wrapped_items)
+        ax.text(
+            center_x,
+            box["y"],
+            text_block,
+            ha="center",
+            va="center",
+            fontsize=12,
+            color="#0f0f0f",
+            fontweight="bold",
+        )
+
+        if idx < len(boxes) - 1:
+            next_box = boxes[idx + 1]
+            ax.annotate(
+                "",
+                xy=(center_x, next_box["y"] + next_box["height"] / 2),
+                xytext=(center_x, box["y"] - box["height"] / 2),
+                arrowprops={
+                    "arrowstyle": "-|>",
+                    "color": "#5d452f",
+                    "linewidth": 2.0,
+                    "shrinkA": 3,
+                    "shrinkB": 5,
+                },
+            )
+
+    title_text = title or "Pipeline d'analyse des articles RTBF"
+    fig.suptitle(title_text, fontsize=16, fontweight="bold", y=1.02)
+
+    return ax
+
+
 def plot_article_distribution_by_year(
     df: pd.DataFrame,
     keywords: Optional[Iterable[str]] = None,
@@ -87,6 +222,7 @@ def plot_article_distribution_by_year(
     text_columns: Sequence[str],
     match_all_keywords: bool = True,
     title: Optional[str] = None,
+    periods: Optional[Sequence[Mapping[str, str]]] = None,
     ax: Optional[plt.Axes] = None,
     figsize: tuple[float, float] = (10, 6),
 ) -> plt.Axes:
@@ -109,6 +245,10 @@ def plot_article_distribution_by_year(
         is counted if it contains at least one keyword.
     title:
         Optional override for the chart title (French text recommended).
+    periods:
+        Optional list of dicts defining custom periods with ``title``,
+        ``start_date`` and ``end_date``. When provided, bars are aggregated by
+        these spans instead of calendar years.
     ax:
         Optional Matplotlib Axes to reuse. When None a new figure is created.
     figsize:
@@ -134,9 +274,70 @@ def plot_article_distribution_by_year(
         raise ValueError("No valid publication dates found to plot.")
 
     working_df = df.loc[valid_mask].copy()
-    working_df["_year"] = pub_dates.loc[valid_mask].dt.year.astype(int)
+    timestamps = pub_dates.loc[valid_mask]
 
-    year_counts = working_df.groupby("_year").size().sort_index()
+    def _parse_periods(period_defs: Sequence[Mapping[str, str]]) -> List[dict]:
+        parsed: List[dict] = []
+        for period in period_defs:
+            title = period.get("title")
+            start = pd.to_datetime(period.get("start_date"), errors="coerce")
+            end_val = period.get("end_date")
+            if isinstance(end_val, str) and end_val.lower() in {"present", "actuel"}:
+                end = pd.Timestamp.max
+            elif end_val is None:
+                end = pd.Timestamp.max
+            else:
+                end = pd.to_datetime(end_val, errors="coerce")
+            if title is None or pd.isna(start) or pd.isna(end):
+                raise ValueError(
+                    "Chaque période doit définir un titre, un start_date et un end_date valides."
+                )
+            if start > end:
+                raise ValueError(
+                    f"La période '{title}' a un start_date postérieur à son end_date."
+                )
+            parsed.append({"title": title, "start": start, "end": end})
+        parsed.sort(key=lambda item: item["start"])
+        return parsed
+
+    use_periods = periods is not None
+    if use_periods:
+        parsed_periods = _parse_periods(periods or [])
+        timeline_labels = [period["title"] for period in parsed_periods]
+        assigned_labels: List[Optional[str]] = []
+        unmatched_dates: List[pd.Timestamp] = []
+        for ts in timestamps:
+            label = None
+            for period in parsed_periods:
+                if period["start"] <= ts <= period["end"]:
+                    label = period["title"]
+                    break
+            assigned_labels.append(label)
+            if label is None:
+                unmatched_dates.append(ts)
+        if unmatched_dates:
+            formatted = ", ".join(
+                sorted({ts.strftime("%Y-%m-%d") for ts in unmatched_dates})
+            )
+            raise ValueError(
+                "Certaines dates de publication ne correspondent à aucune période fournie: "
+                f"{formatted}"
+            )
+        working_df["_timeline_label"] = pd.Categorical(
+            assigned_labels, categories=timeline_labels, ordered=True
+        )
+    else:
+        years = timestamps.dt.year.astype(int)
+        timeline_labels = sorted(years.unique())
+        working_df["_timeline_label"] = pd.Categorical(
+            years, categories=timeline_labels, ordered=True
+        )
+
+    timeline_counts = (
+        working_df.groupby("_timeline_label")
+        .size()
+        .reindex(timeline_labels, fill_value=0)
+    )
 
     if not text_columns:
         raise ValueError("text_columns must include at least one column name.")
@@ -163,9 +364,9 @@ def plot_article_distribution_by_year(
 
     keyword_counts = (
         working_df.loc[keyword_mask]
-        .groupby("_year")
+        .groupby("_timeline_label")
         .size()
-        .reindex(year_counts.index, fill_value=0)
+        .reindex(timeline_labels, fill_value=0)
     )
 
     if ax is None:
@@ -174,36 +375,33 @@ def plot_article_distribution_by_year(
     base_color = PALETTE[1]
     highlight_color = PALETTE[2]
 
+    positions = np.arange(len(timeline_labels))
     ax.bar(
-        year_counts.index,
-        year_counts.values,
+        positions,
+        timeline_counts.values,
         color=base_color,
         edgecolor=PALETTE[0],
         label="Articles",
     )
 
     if normalized_keywords:
-        keywords_text = (
-            f'"{'", "'.join(provided_keywords)}"' if provided_keywords else ""
-        )
+        keywords_text = f'"{", ".join(provided_keywords)}"' if provided_keywords else ""
         label_text = f"Mentionnant {keywords_text}"
         ax.bar(
-            keyword_counts.index,
+            positions,
             keyword_counts.values,
             width=0.55,
             color=highlight_color,
             label=label_text,
         )
 
-        proportions = keyword_counts / year_counts.replace(0, pd.NA)
-        max_height = year_counts.max()
-        for year, count, proportion in zip(
-            keyword_counts.index, keyword_counts.values, proportions
-        ):
+        proportions = keyword_counts / timeline_counts.replace(0, pd.NA)
+        max_height = timeline_counts.max()
+        for x, count, proportion in zip(positions, keyword_counts.values, proportions):
             if pd.isna(proportion):
                 continue
             ax.text(
-                year,
+                x,
                 count + max(max_height * 0.015, 0.5),
                 _format_percentage(proportion),
                 ha="center",
@@ -213,7 +411,11 @@ def plot_article_distribution_by_year(
                 color="#2f3b1c",
             )
 
-    ax.set_xlabel("Année de publication")
+    ax.set_xticks(positions)
+    ax.set_xticklabels(
+        [str(label) for label in timeline_labels], rotation=0, ha="center"
+    )
+    ax.set_xlabel("Période" if use_periods else "Année de publication")
     ax.set_ylabel("Nombre d'articles")
     ax.set_title(title or "Répartition des articles par année")
     ax.grid(axis="y", alpha=0.4)
@@ -315,14 +517,14 @@ def plot_keyword_category_distribution(
     major = raw_counts[shares >= min_share]
     minor = raw_counts[shares < min_share]
 
-    major_sorted = major.sort_values(ascending=False)
+    major_sorted = major.sort_values(ascending=True)
     if minor.empty:
         category_counts = major_sorted
     else:
         category_counts = pd.concat(
             [
-                major_sorted,
                 pd.Series({"Autres": minor.sum()}),
+                major_sorted,
             ],
             ignore_index=False,
         )
@@ -336,8 +538,8 @@ def plot_keyword_category_distribution(
     else:
         fig = ax.figure
 
-    fig.patch.set_facecolor("whitesmoke")
-    ax.set_facecolor("whitesmoke")
+    fig.patch.set_facecolor("#ffffff")
+    ax.set_facecolor("#ffffff")
 
     colors = (PALETTE * (num_categories // len(PALETTE) + 1))[:num_categories]
 
@@ -401,6 +603,7 @@ def plot_keyword_category_distribution(
 
 
 __all__ = [
+    "plot_analysis_pipeline",
     "plot_article_distribution_by_year",
     "plot_keyword_category_distribution",
     "plot_stereotype_stance_over_time",
@@ -419,6 +622,7 @@ def plot_stereotype_stance_over_time(
     mode_col: str = "st_mode",
     stereotype_name: Optional[str] = None,
     title: Optional[str] = None,
+    periods: Optional[Sequence[Mapping[str, str]]] = None,
     ax: Optional[plt.Axes] = None,
     figsize: tuple[float, float] = (16, 6),
     show_percentages: bool = True,
@@ -446,14 +650,73 @@ def plot_stereotype_stance_over_time(
         raise ValueError("Aucune date de publication valide n'a été trouvée.")
 
     df = df.loc[valid_mask].copy()
-    df["_year"] = pub_dates.loc[valid_mask].dt.year
+    timestamp_series = pub_dates.loc[valid_mask]
+
+    def _parse_periods(period_defs: Sequence[Mapping[str, str]]) -> List[dict]:
+        parsed: List[dict] = []
+        for period in period_defs:
+            title = period.get("title")
+            start = pd.to_datetime(period.get("start_date"), errors="coerce")
+            end_val = period.get("end_date")
+            if isinstance(end_val, str) and end_val.lower() in {"present", "actuel"}:
+                end = pd.Timestamp.max
+            elif end_val is None:
+                end = pd.Timestamp.max
+            else:
+                end = pd.to_datetime(end_val, errors="coerce")
+            if title is None or pd.isna(start) or pd.isna(end):
+                raise ValueError(
+                    "Chaque période doit inclure un titre, un start_date et un end_date valides."
+                )
+            if start > end:
+                raise ValueError(
+                    f"La période '{title}' a un start_date postérieur à son end_date."
+                )
+            parsed.append({"title": title, "start": start, "end": end})
+        parsed.sort(key=lambda item: item["start"])
+        return parsed
+
+    use_periods = periods is not None
+    if use_periods:
+        parsed_periods = _parse_periods(periods or [])
+        timeline_labels = [period["title"] for period in parsed_periods]
+        assigned_labels: List[Optional[str]] = []
+        unmatched = []
+        for ts in timestamp_series:
+            label = None
+            for period in parsed_periods:
+                if period["start"] <= ts <= period["end"]:
+                    label = period["title"]
+                    break
+            assigned_labels.append(label)
+            if label is None:
+                unmatched.append(ts)
+        if unmatched:
+            formatted = ", ".join(sorted({ts.strftime("%Y-%m-%d") for ts in unmatched}))
+            raise ValueError(
+                "Certaines dates ne correspondent à aucune période fournie: "
+                f"{formatted}"
+            )
+        df["_timeline_label"] = pd.Categorical(
+            assigned_labels, categories=timeline_labels, ordered=True
+        )
+    else:
+        years = timestamp_series.dt.year.astype(int)
+        timeline_labels = sorted(years.unique())
+        df["_timeline_label"] = pd.Categorical(
+            years, categories=timeline_labels, ordered=True
+        )
 
     presence_mask = df[presence_col].astype(str).str.strip().str.lower().eq("yes")
     stereotype_df = df.loc[presence_mask]
     if stereotype_df.empty:
         raise ValueError("Aucun article avec stéréotype présent n'a été trouvé.")
 
-    total_counts = stereotype_df.groupby("_year").size().sort_index()
+    timeline_counts = (
+        stereotype_df.groupby("_timeline_label")
+        .size()
+        .reindex(timeline_labels, fill_value=0)
+    )
 
     normalized_mode = (
         stereotype_df[mode_col]
@@ -478,10 +741,10 @@ def plot_stereotype_stance_over_time(
     }
 
     stance_counts = (
-        stereotype_df.groupby(["_year", "_mode"])
+        stereotype_df.groupby(["_timeline_label", "_mode"])
         .size()
         .unstack("_mode")
-        .reindex(total_counts.index, fill_value=0)
+        .reindex(timeline_labels, fill_value=0)
     )
 
     for key in modes:
@@ -491,7 +754,7 @@ def plot_stereotype_stance_over_time(
     stance_counts = stance_counts[list(modes.keys())]
     if show_percentages:
         stance_values = (
-            stance_counts.div(total_counts, axis=0)
+            stance_counts.div(timeline_counts, axis=0)
             .replace([np.inf, -np.inf], np.nan)
             .fillna(0.0)
             * 100.0
@@ -507,12 +770,17 @@ def plot_stereotype_stance_over_time(
     ax_lines = ax
     ax_bars = ax_lines.twinx()
 
-    years = total_counts.index.to_list()
+    if use_periods:
+        x_coords = np.arange(len(timeline_labels))
+        ax_lines.set_xticks(x_coords)
+        ax_lines.set_xticklabels(timeline_labels, rotation=0, ha="center")
+    else:
+        x_coords = np.array(timeline_labels, dtype=float)
     color_cycle = PALETTE
 
     for idx, (mode_key, label) in enumerate(modes.items()):
         ax_lines.plot(
-            years,
+            x_coords,
             stance_values[mode_key].values,
             marker="o",
             linewidth=2.2,
@@ -523,8 +791,8 @@ def plot_stereotype_stance_over_time(
 
     bar_color = color_cycle[4 % len(color_cycle)]
     ax_bars.bar(
-        years,
-        total_counts.values,
+        x_coords,
+        timeline_counts.values,
         color=bar_color,
         alpha=0.35,
         label="Total d'articles",
@@ -540,7 +808,7 @@ def plot_stereotype_stance_over_time(
         ax_lines.set_ylabel("Nombre d'articles (stéréotype présent)")
         ax_lines.yaxis.set_major_formatter(mpl.ticker.ScalarFormatter())
 
-    ax_lines.set_xlabel("Année de publication")
+    ax_lines.set_xlabel("Période" if use_periods else "Année de publication")
     ax_bars.set_ylabel("Nombre d'articles (stéréotype présent)")
 
     ax_lines.grid(axis="y", alpha=0.25)
@@ -568,7 +836,10 @@ def plot_stereotype_stance_over_time(
             color="#4a2f2f",
         )
 
-    fig.tight_layout(rect=(0, 0, 1, 0.88))
+    if use_periods:
+        fig.tight_layout(rect=(0, 0, 1, 1))
+    else:
+        fig.tight_layout(rect=(0, 0, 1, 0.88))
     return ax_lines, ax_bars
 
 
@@ -690,8 +961,8 @@ def plot_actor_mentions(
     else:
         fig = ax.figure
 
-    fig.patch.set_facecolor("whitesmoke")
-    ax.set_facecolor("whitesmoke")
+    fig.patch.set_facecolor("#ffffff")
+    ax.set_facecolor("#ffffff")
 
     bars = ax.barh(
         positions,
